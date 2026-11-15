@@ -1,0 +1,57 @@
+# ceph-csi CephFS driver: shared CephFS folders as Kubernetes volumes that
+# many pods on different nodes can mount at once (ReadWriteMany).
+# Installed by k3s's built-in Helm controller (no Helm needed on the Mac):
+#   kubectl apply -f k8s/ceph-csi/cephfs.yaml
+# Watch the install:   kubectl -n kube-system get jobs,pods | grep ceph-csi-cephfs
+# Uninstall:           kubectl delete -f k8s/ceph-csi/cephfs.yaml
+#
+# Needs ceph/prepare-ceph.sh first (filesystem 'cephfs' with subvolume group
+# 'csi', user 'client.k8s-cephfs', namespace 'ceph-csi-cephfs' and Secret
+# 'csi-cephfs-secret').
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: ceph-csi-cephfs
+  namespace: kube-system            # where k3s's Helm controller looks for HelmCharts
+spec:
+  repo: https://ceph.github.io/csi-charts
+  chart: ceph-csi-cephfs
+  version: 3.18.2                   # ceph-csi v3.18.2 (2026-11-02); pinned, so upgrades are deliberate
+  targetNamespace: ceph-csi-cephfs  # created by prepare-ceph.sh, with the Secret
+  valuesContent: |-
+    # How to reach the Ceph cluster, and the CephFS subvolume group
+    # ('csi', made by prepare-ceph.sh) that volumes are created in.
+    csiConfig:
+      - clusterID: "05112a58-1b41-43a8-b5dc-ae4dfd002e3e"
+        monitors:
+          - "192.168.65.201:6789"
+          - "192.168.65.202:6789"
+          - "192.168.65.203:6789"
+        cephFS:
+          subvolumeGroup: "csi"
+
+    # One provisioner copy instead of the default 3 (RAM is tight; it's only
+    # busy when volumes are created, resized or deleted).
+    provisioner:
+      replicaCount: 1
+
+    # Ubuntu uses AppArmor, not SELinux.
+    selinuxMount: false
+
+    # The keys come from the Secret made by prepare-ceph.sh, not from here.
+    secret:
+      create: false
+      name: csi-cephfs-secret
+
+    storageClass:
+      create: true
+      name: cephfs
+      clusterID: "05112a58-1b41-43a8-b5dc-ae4dfd002e3e"
+      fsName: cephfs
+      # The nodes' kernel CephFS client (module 'ceph'), rather than the
+      # slower FUSE client.
+      mounter: kernel
+      # Delete: removing a claim removes its folder. Fine for /music, which
+      # is a copy of files kept elsewhere.
+      reclaimPolicy: Delete
+      allowVolumeExpansion: true

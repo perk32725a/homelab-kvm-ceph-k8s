@@ -1,0 +1,63 @@
+# ceph-csi RBD driver: Ceph block devices as Kubernetes volumes.
+# Installed by k3s's built-in Helm controller (no Helm needed on the Mac):
+#   kubectl apply -f k8s/ceph-csi/rbd.yaml
+# Watch the install:   kubectl -n kube-system get jobs,pods | grep ceph-csi-rbd
+# Uninstall:           kubectl delete -f k8s/ceph-csi/rbd.yaml
+#
+# Needs ceph/prepare-ceph.sh first (pool 'k8s-rbd', user 'client.k8s-rbd',
+# namespace 'ceph-csi-rbd' and Secret 'csi-rbd-secret').
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: ceph-csi-rbd
+  namespace: kube-system            # where k3s's Helm controller looks for HelmCharts
+spec:
+  repo: https://ceph.github.io/csi-charts
+  chart: ceph-csi-rbd
+  version: 3.18.2                   # ceph-csi v3.18.2 (2026-11-02); pinned, so upgrades are deliberate
+  targetNamespace: ceph-csi-rbd     # created by prepare-ceph.sh, with the Secret
+  valuesContent: |-
+    # How to reach the Ceph cluster: its ID ('ceph fsid') and monitors.
+    csiConfig:
+      - clusterID: "05112a58-1b41-43a8-b5dc-ae4dfd002e3e"
+        monitors:
+          - "192.168.65.201:6789"
+          - "192.168.65.202:6789"
+          - "192.168.65.203:6789"
+
+    # One provisioner copy instead of the default 3: it only works when a
+    # volume is created, resized or deleted, and RAM is tight on these nodes.
+    # (The per-node plugin that attaches volumes still runs on every node.)
+    provisioner:
+      replicaCount: 1
+
+    # The per-node plugin runs on the node's own network and serves health/
+    # metrics on a host port, 8080 by default. That port is already taken on
+    # every node by k3s ServiceLB publishing HAProxy (http://nodeN:8080), so
+    # the plugin couldn't be scheduled anywhere (seen 2026-11-15). Use 8082
+    # (the CephFS plugin uses 8081).
+    nodeplugin:
+      httpMetrics:
+        containerPort: 8082
+
+    # Ubuntu uses AppArmor, not SELinux.
+    selinuxMount: false
+
+    # The keys come from the Secret made by prepare-ceph.sh, not from here.
+    secret:
+      create: false
+      name: csi-rbd-secret
+
+    storageClass:
+      create: true
+      name: ceph-rbd
+      clusterID: "05112a58-1b41-43a8-b5dc-ae4dfd002e3e"
+      pool: k8s-rbd
+      # layering: the basic format; exclusive-lock: only one client can write
+      # to an image at a time (protects a database if two nodes ever mapped it).
+      imageFeatures: "layering,exclusive-lock"
+      fstype: ext4
+      # Retain: deleting a claim keeps the RBD image (and the data) in Ceph;
+      # it has to be removed by hand. Safer for a database.
+      reclaimPolicy: Retain
+      allowVolumeExpansion: true
