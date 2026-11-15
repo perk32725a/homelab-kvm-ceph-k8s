@@ -1,0 +1,13 @@
+# never commit cluster credentials or keys
+*.keyring
+*kubeconfig*
+k3s.yaml
+*.key
+
+# backups and transfer archives
+*.tar
+*.tar.gz
+*.sql
+*.sql.gz
+
+.DS_Store
