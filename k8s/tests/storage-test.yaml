@@ -1,0 +1,31 @@
+# Throwaway test of the ceph-csi StorageClasses (run by storage-test.sh).
+# Everything lives in its own namespace; nothing here touches the app.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: storage-test
+---
+# RBD: a block device, mounted by one node at a time (ReadWriteOnce).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rbd-test
+  namespace: storage-test
+spec:
+  storageClassName: ceph-rbd
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests: {storage: 1Gi}
+---
+# CephFS: a shared folder, mounted by many nodes at once (ReadWriteMany).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: cephfs-test
+  namespace: storage-test
+spec:
+  storageClassName: cephfs
+  accessModes: [ReadWriteMany]
+  resources:
+    requests: {storage: 1Gi}
