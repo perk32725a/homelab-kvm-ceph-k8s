@@ -1,6 +1,6 @@
 # homelab-kvm-ceph-k8s
 
-Home lab: a 3-node Ceph cluster (MicroCeph) and k3s Kubernetes cluster on
+Home lab: a 4-node Ceph cluster (MicroCeph) and k3s Kubernetes cluster on
 Ubuntu 26.04 ARM64 VMs (UTM on an Apple M1 Max), with Ceph providing
 Kubernetes storage through ceph-csi.
 
@@ -9,6 +9,11 @@ Kubernetes storage through ceph-csi.
 | node1 | 192.168.65.201 | Ceph mon/mgr/mds/osd, k3s server   |
 | node2 | 192.168.65.202 | Ceph mon/mgr/mds/osd, k3s agent    |
 | node3 | 192.168.65.203 | Ceph mon/mgr/mds/osd, k3s agent    |
+| node4 | 192.168.65.204 | Ceph osd, k3s agent                |
+
+node1–3 were built by hand; node4 was added later with the Ansible
+playbook below (Ceph keeps three monitors, managers and metadata servers,
+so node4 runs only an OSD).
 
 The application deployed on it (an ASP.NET Core music database with MySQL,
 Redis and HAProxy) lives in its own repo,
@@ -24,7 +29,8 @@ Redis and HAProxy) lives in its own repo,
 
 The setup was first done by hand, then captured as four roles and checked
 against the running cluster: `ansible-playbook site.yml --check --diff`
-reports no changes on any node.
+reports no changes on any node. Then a fourth node was added by listing it
+in `inventory.ini` and running the playbook once.
 
 | Role        | Hosts       | Sets up |
 | ----------- | ----------- | ------- |

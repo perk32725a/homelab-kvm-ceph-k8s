@@ -128,8 +128,11 @@
     - k3s_drift | length > 0
   no_log: true
 
+# Skipped in --check when the installer would run: on a new node the
+# service doesn't exist yet, so checking it would fail.
 - name: k3s starts at boot and is running
   ansible.builtin.service:
     name: "{{ k3s_service }}"
     enabled: true
     state: started
+  when: not (ansible_check_mode and k3s_drift | length > 0)
