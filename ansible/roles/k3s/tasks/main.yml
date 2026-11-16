@@ -1,0 +1,135 @@
+# k3s (lab-plan step 2, part 1): server on node1, agents on the others.
+# The official installer is only run when something differs from what's
+# wanted: k3s version, the options in the service file, or (on agents) the
+# saved server address and join token. Running the installer restarts k3s.
+
+- name: Work out this node's part
+  ansible.builtin.set_fact:
+    k3s_role: "{{ 'server' if inventory_hostname in groups['k3s_server'] else 'agent' }}"
+    k3s_service: "{{ 'k3s' if inventory_hostname in groups['k3s_server'] else 'k3s-agent' }}"
+    k3s_args: "{{ k3s_server_args if inventory_hostname in groups['k3s_server'] else k3s_agent_args }}"
+
+- name: Read the installed k3s version
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: k3s_installed
+  changed_when: false
+  check_mode: false
+  failed_when: false              # not installed yet
+
+# The installer writes each option on its own line, in single quotes:
+#     ExecStart=/usr/local/bin/k3s \
+#         server \
+#     	'--disable' \
+- name: Read the service file
+  ansible.builtin.slurp:
+    src: /etc/systemd/system/{{ k3s_service }}.service
+  register: k3s_unit
+  failed_when: false
+
+# Agents keep K3S_URL and K3S_TOKEN here (root only). An empty token is how
+# the first agent install failed ("--token is required").
+- name: Read the agent's saved server address and token
+  ansible.builtin.slurp:
+    src: /etc/systemd/system/k3s-agent.service.env
+  register: k3s_agent_env
+  failed_when: false
+  when: k3s_role == 'agent'
+  no_log: true
+
+- name: Check the agent's saved settings (without showing the token)
+  ansible.builtin.set_fact:
+    k3s_env_ok: "{{ env is search(url_re) and env is search(token_re) }}"
+  vars:
+    env: "{{ k3s_agent_env.content | default('') | b64decode }}"
+    # Single-quoted YAML: backslashes are literal, and '' is one quote.
+    url_re: '(?m)^K3S_URL=["'']?{{ k3s_url | regex_escape }}["'']?$'
+    token_re: '(?m)^K3S_TOKEN=["'']?[^"''\s]+'
+  when: k3s_role == 'agent'
+  no_log: true
+
+- name: Compare with what's wanted
+  ansible.builtin.set_fact:
+    k3s_drift: "{{ [
+        ('k3s ' ~ (k3s_installed.stdout_lines[0] | default('not installed')) ~ ', want ' ~ k3s_version)
+          if ('k3s version ' ~ k3s_version ~ ' ') not in k3s_installed.stdout | default('') else '',
+        ('service options ' ~ (unit_mode ~ ' ' ~ unit_args | join(' ')) ~ ', want ' ~ (k3s_role ~ ' ' ~ k3s_args | join(' ')))
+          if unit_mode != k3s_role or unit_args != k3s_args else '',
+        'agent: saved server address or token missing' if not (k3s_env_ok | default(true)) else ''
+      ] | select | list }}"
+  vars:
+    unit: "{{ k3s_unit.content | default('') | b64decode }}"
+    unit_mode: "{{ unit | regex_search(mode_re, '\\1') | default([''], true) | first }}"
+    unit_args: "{{ unit | regex_findall(args_re) }}"
+    mode_re: 'ExecStart=\S+ \\\n[ \t]+(\w+)'       # the word after 'ExecStart=... \'
+    args_re: '(?m)^[ \t]+''([^'']*)'' \\$'          # each quoted option line
+
+- name: Show why the installer would run
+  ansible.builtin.debug:
+    var: k3s_drift
+  changed_when: true
+  when: k3s_drift | length > 0
+
+- name: Download the k3s installer
+  ansible.builtin.get_url:
+    url: "{{ k3s_installer_url }}"
+    dest: /var/tmp/k3s-install.sh
+    mode: "0755"
+  when: k3s_drift | length > 0
+
+- name: Install k3s server
+  ansible.builtin.command: >-
+    {{ check_echo }} sh /var/tmp/k3s-install.sh server {{ k3s_args | map('quote') | join(' ') }}
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+  check_mode: false
+  when:
+    - k3s_role == 'server'
+    - k3s_drift | length > 0
+
+- name: Wait for the server's join token
+  ansible.builtin.wait_for:
+    path: /var/lib/rancher/k3s/server/node-token
+  delegate_to: "{{ k3s_server_host }}"
+  run_once: true
+
+# Read during the run, passed to the installer in its environment, never
+# written down or shown. Only read when an agent needs (re)installing.
+- name: Read the join token from the server
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/node-token
+  register: k3s_token
+  delegate_to: "{{ k3s_server_host }}"
+  run_once: true
+  when: >-
+    ansible_play_hosts | intersect(groups['k3s_agents'])
+    | map('extract', hostvars, 'k3s_drift') | select | list | length > 0
+  no_log: true
+
+- name: Stop if the token came back empty (the agent would never join)
+  ansible.builtin.assert:
+    that: k3s_token.content | default('') | b64decode | trim | length > 0
+    quiet: true
+  when:
+    - k3s_role == 'agent'
+    - k3s_drift | length > 0
+    - not ansible_check_mode
+  no_log: true
+
+- name: Install k3s agent
+  ansible.builtin.command: >-
+    {{ check_echo }} sh /var/tmp/k3s-install.sh agent {{ k3s_args | map('quote') | join(' ') }}
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    K3S_URL: "{{ k3s_url }}"
+    K3S_TOKEN: "{{ k3s_token.content | default('') | b64decode | trim }}"
+  check_mode: false
+  when:
+    - k3s_role == 'agent'
+    - k3s_drift | length > 0
+  no_log: true
+
+- name: k3s starts at boot and is running
+  ansible.builtin.service:
+    name: "{{ k3s_service }}"
+    enabled: true
+    state: started

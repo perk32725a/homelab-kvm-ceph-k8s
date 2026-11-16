@@ -1,0 +1,15 @@
+# The nodes' network: UTM Shared Network, pinned to 192.168.65.0/24 in UTM.
+# The Mac is the gateway and DNS server.
+lab_connection: netplan-enp0s1    # NetworkManager connection made by the installer
+lab_prefix: 24
+lab_gateway: 192.168.65.1
+lab_dns: 192.168.65.1
+
+# Check mode (--check) normally reports a command that WOULD run as "skipped",
+# so a drifted setting fixed by a command would go unnoticed. Every command
+# that changes something is therefore written as
+#     command: "{{ check_echo }} <the real command>"
+#     check_mode: false
+# In --check it runs 'echo WOULD RUN: <the real command>' instead, which
+# changes nothing and shows up as "changed"; in a real run check_echo is empty.
+check_echo: "{{ 'echo WOULD RUN:' if ansible_check_mode else '' }}"

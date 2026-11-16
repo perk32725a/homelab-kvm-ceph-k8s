@@ -1,0 +1,8 @@
+microceph_channel: squid/stable          # the snap's default track is empty; name a release
+microceph_disk: /dev/vdb                 # the empty 30 GB disk on every node
+microceph_bootstrap_host: "{{ groups['ceph'][0] }}"   # node1: creates the cluster, hands out join tokens
+
+# Memory caps for 6-8 GB nodes that also run k3s (Ceph's defaults are 4 GB each).
+microceph_config:
+  - { who: osd, name: osd_memory_target, value: 1610612736 }     # 1.5 GB per OSD
+  - { who: mds, name: mds_cache_memory_limit, value: 536870912 } # 512 MB per CephFS MDS

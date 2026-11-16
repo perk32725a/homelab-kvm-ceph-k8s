@@ -18,6 +18,32 @@ Redis and HAProxy) lives in its own repo,
 
 - `ceph/` – scripts run on a Ceph node (Kubernetes pools, CephFS, users).
 - `k8s/ceph-csi/` – ceph-csi drivers and StorageClasses for Kubernetes.
+- `ansible/` – the node setup as Ansible roles (see below).
+
+## Ansible
+
+The setup was first done by hand, then captured as four roles and checked
+against the running cluster: `ansible-playbook site.yml --check --diff`
+reports no changes on any node.
+
+| Role        | Hosts       | Sets up |
+| ----------- | ----------- | ------- |
+| `common`    | all nodes   | hostname and `/etc/hosts`, swap off, SSH and guest agent, text-mode boot, fixed address (NetworkManager), an AppArmor sysctl workaround for k3s ([containerd#14485](https://github.com/containerd/containerd/issues/14485)) |
+| `microceph` | all nodes   | MicroCeph (Squid, snap held): bootstrap, join, one OSD per node, memory caps |
+| `k3s`       | all nodes   | k3s server on node1 (Traefik off), agents on node2/node3, pinned version |
+| `ceph_k8s`  | node1       | `ceph/prepare-ceph.sh` and the `k8s/ceph-csi/` manifests |
+
+```
+cd ansible
+ansible-playbook site.yml --check --diff -K   # show what would change
+ansible-playbook site.yml --diff -K           # apply
+```
+
+Each role reads the current state first and acts only where it differs, so
+a run on the built cluster changes nothing. Commands that change something
+are written so that `--check` reports them as changed instead of silently
+skipping them. Join tokens and Ceph keys are read during the run and never
+shown (`no_log`) or written down.
 
 ## Secrets
 

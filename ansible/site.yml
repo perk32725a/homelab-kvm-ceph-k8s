@@ -1,0 +1,28 @@
+# The whole lab, in order. Run from this folder:
+#   ansible-playbook site.yml --check --diff -K    # show what would change
+#   ansible-playbook site.yml --diff -K            # apply
+# -K asks for the sudo password; it is never stored.
+
+- name: Base settings on every node (lab-plan step 0)
+  hosts: lab
+  become: true
+  roles:
+    - common
+
+- name: Ceph with MicroCeph (lab-plan step 1)
+  hosts: ceph
+  become: true
+  roles:
+    - microceph
+
+- name: Kubernetes with k3s (lab-plan step 2, part 1)
+  hosts: k3s_server:k3s_agents
+  become: true
+  roles:
+    - k3s
+
+- name: Ceph storage for Kubernetes (lab-plan step 2, part 5)
+  hosts: k3s_server
+  become: true
+  roles:
+    - ceph_k8s

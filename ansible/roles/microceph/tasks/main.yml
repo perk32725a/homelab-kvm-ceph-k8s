@@ -1,0 +1,102 @@
+# Ceph with MicroCeph (lab-plan step 1). Every step first checks what exists,
+# so running it on a built cluster changes nothing, and running it with a new
+# node in the inventory adds that node.
+#
+# 'microceph.ceph' (not 'ceph'): node1 also has ceph-common's /usr/bin/ceph,
+# so the snap's own command is named to behave the same on every node.
+
+- name: MicroCeph snap is installed
+  community.general.snap:
+    name: microceph
+    channel: "{{ microceph_channel }}"
+
+- name: Read the snap's hold state
+  ansible.builtin.command: snap list microceph
+  register: microceph_snap
+  changed_when: false
+  check_mode: false
+  failed_when: false              # --check on a new node: not installed yet
+
+- name: Hold the snap (no automatic updates mid-lab)
+  ansible.builtin.command: "{{ check_echo }} snap refresh --hold microceph"
+  check_mode: false
+  when: "'held' not in microceph_snap.stdout"
+
+- name: Read the cluster members
+  ansible.builtin.command: microceph cluster list
+  register: microceph_members
+  changed_when: false
+  check_mode: false
+  failed_when: false
+  delegate_to: "{{ microceph_bootstrap_host }}"
+  run_once: true
+
+# Only a clear "no cluster yet" leads to bootstrap; any other error stops the
+# run, so a daemon that's merely down can never get a second cluster.
+- name: Stop on an unexpected answer
+  ansible.builtin.fail:
+    msg: "microceph cluster list failed: {{ microceph_members.stderr | default(microceph_members.msg) }}"
+  when:
+    - microceph_members.rc != 0
+    - "'not yet initialized' not in microceph_members.stderr | default('')"
+    - not ansible_check_mode
+  run_once: true
+
+- name: Create the cluster (only if there is none)
+  ansible.builtin.command: "{{ check_echo }} microceph cluster bootstrap"
+  check_mode: false
+  when:
+    - inventory_hostname == microceph_bootstrap_host
+    - microceph_members.rc != 0
+
+# A node is a member if 'cluster list' has a table row with its name.
+# The one-time token is a secret: no_log keeps it out of the output.
+- name: Join token for each node not yet in the cluster
+  ansible.builtin.command: "{{ check_echo }} microceph cluster add {{ inventory_hostname }}"
+  check_mode: false
+  register: microceph_token
+  delegate_to: "{{ microceph_bootstrap_host }}"
+  when:
+    - inventory_hostname != microceph_bootstrap_host
+    - microceph_members.stdout is not search('\|\s*' ~ inventory_hostname ~ '\s*\|')
+  no_log: true
+
+- name: Join the cluster
+  ansible.builtin.command: "{{ check_echo }} microceph cluster join {{ microceph_token.stdout | trim }}"
+  check_mode: false
+  when: microceph_token is changed
+  no_log: true
+
+# 'osd ls-tree <host>' lists the OSDs on that host: empty, or exit code 2
+# (ENOENT, no such host in Ceph yet), means the disk hasn't been added.
+- name: Read this node's OSDs
+  ansible.builtin.command: microceph.ceph osd ls-tree {{ inventory_hostname }}
+  register: microceph_osds
+  changed_when: false
+  check_mode: false
+  failed_when: microceph_osds.rc not in [0, 2]
+
+- name: Give the empty disk to Ceph (only if this node has no OSD)
+  ansible.builtin.command: "{{ check_echo }} microceph disk add {{ microceph_disk }}"
+  check_mode: false
+  when: microceph_osds.stdout | trim | length == 0
+
+- name: Read the memory caps
+  ansible.builtin.command: microceph.ceph config get {{ item.who }} {{ item.name }}
+  loop: "{{ microceph_config }}"
+  register: microceph_config_now
+  changed_when: false
+  check_mode: false
+  failed_when: false              # --check before a cluster exists
+  delegate_to: "{{ microceph_bootstrap_host }}"
+  run_once: true
+
+- name: Set the memory caps
+  ansible.builtin.command: "{{ check_echo }} microceph.ceph config set {{ item.item.who }} {{ item.item.name }} {{ item.item.value }}"
+  check_mode: false
+  loop: "{{ microceph_config_now.results }}"
+  loop_control:
+    label: "{{ item.item.who }} {{ item.item.name }} = {{ item.item.value }}"
+  when: item.stdout | default('') | trim != item.item.value | string
+  delegate_to: "{{ microceph_bootstrap_host }}"
+  run_once: true

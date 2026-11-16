@@ -1,0 +1,113 @@
+# Ceph storage for Kubernetes (lab-plan step 2, part 5), on node1, which has
+# both Ceph and k3s's kubectl. prepare-ceph.sh is safe to run again but
+# always "acts", so the role first reads what it would create and runs it
+# only when something is missing or a Kubernetes Secret no longer holds the
+# Ceph user's current key. Keys are compared in no_log tasks, never shown.
+
+- name: Read the RBD pool's application tag
+  ansible.builtin.command: microceph.ceph osd pool application get {{ ceph_k8s_rbd_pool }} -f json
+  register: ceph_k8s_pool
+  changed_when: false
+  check_mode: false
+  failed_when: false              # no such pool
+
+- name: Read the CephFS filesystems
+  ansible.builtin.command: microceph.ceph fs ls -f json
+  register: ceph_k8s_fs_ls
+  changed_when: false
+  check_mode: false
+
+- name: Read the CephFS subvolume groups
+  ansible.builtin.command: microceph.ceph fs subvolumegroup ls {{ ceph_k8s_fs }} -f json
+  register: ceph_k8s_groups
+  changed_when: false
+  check_mode: false
+  failed_when: false              # no such filesystem
+
+- name: Read the Kubernetes users' Ceph keys
+  ansible.builtin.command: microceph.ceph auth get-key client.{{ item }}
+  loop: [k8s-rbd, k8s-cephfs]
+  register: ceph_k8s_keys
+  changed_when: false
+  check_mode: false
+  failed_when: false              # no such user
+  no_log: true
+
+- name: Read the ceph-csi Secrets
+  ansible.builtin.command: k3s kubectl -n {{ item.ns }} get secret {{ item.name }} -o json
+  loop:
+    - { ns: ceph-csi-rbd, name: csi-rbd-secret }
+    - { ns: ceph-csi-cephfs, name: csi-cephfs-secret }
+  register: ceph_k8s_secrets
+  changed_when: false
+  check_mode: false
+  failed_when: false              # no such namespace or Secret
+  no_log: true
+
+- name: Check that each Secret holds its Ceph user's current key
+  ansible.builtin.set_fact:
+    ceph_k8s_secrets_ok: >-
+      {{ rbd_key | length > 0 and fs_key | length > 0
+         and rbd.userID | default('') | b64decode == 'k8s-rbd'
+         and rbd.userKey | default('') | b64decode == rbd_key
+         and fs.userID | default('') | b64decode == 'k8s-cephfs'
+         and fs.userKey | default('') | b64decode == fs_key
+         and fs.adminID | default('') | b64decode == 'k8s-cephfs'
+         and fs.adminKey | default('') | b64decode == fs_key }}
+  vars:
+    rbd_key: "{{ ceph_k8s_keys.results[0].stdout | default('') | trim }}"
+    fs_key: "{{ ceph_k8s_keys.results[1].stdout | default('') | trim }}"
+    rbd: "{{ (ceph_k8s_secrets.results[0].stdout | default('{}', true) | from_json).data | default({}) }}"
+    fs: "{{ (ceph_k8s_secrets.results[1].stdout | default('{}', true) | from_json).data | default({}) }}"
+  no_log: true
+
+- name: Compare with what prepare-ceph.sh creates
+  ansible.builtin.set_fact:
+    ceph_k8s_drift: "{{ [
+        ('RBD pool ' ~ ceph_k8s_rbd_pool ~ ' missing or not initialised for RBD')
+          if 'rbd' not in (ceph_k8s_pool.stdout | default('{}', true) | from_json) else '',
+        ('CephFS ' ~ ceph_k8s_fs ~ ' missing')
+          if ceph_k8s_fs not in (ceph_k8s_fs_ls.stdout | from_json | map(attribute='name') | list) else '',
+        ('subvolume group csi missing')
+          if 'csi' not in (ceph_k8s_groups.stdout | default('[]', true) | from_json | map(attribute='name') | list) else '',
+        'a Ceph user, a Secret, or a key in a Secret is missing or out of date'
+          if not ceph_k8s_secrets_ok | bool else ''
+      ] | select | list }}"
+
+- name: Show why prepare-ceph.sh would run
+  ansible.builtin.debug:
+    var: ceph_k8s_drift
+  changed_when: true
+  when: ceph_k8s_drift | length > 0
+
+- name: Run prepare-ceph.sh (from the repo, on stdin)
+  ansible.builtin.command: "{{ check_echo }} sh -s"
+  args:
+    stdin: "{{ lookup('ansible.builtin.file', ceph_k8s_script) }}"
+  check_mode: false
+  when: ceph_k8s_drift | length > 0
+
+# The ceph-csi drivers are HelmChart objects that k3s's Helm controller
+# installs. 'kubectl diff' exits 0 when the cluster already matches the
+# file, 1 when it differs.
+- name: Compare the ceph-csi manifests with the cluster
+  ansible.builtin.command: k3s kubectl diff -f -
+  args:
+    stdin: "{{ lookup('ansible.builtin.file', item) }}"
+  loop: "{{ ceph_k8s_manifests }}"
+  loop_control:
+    label: "{{ item | basename }}"
+  register: ceph_k8s_diff
+  changed_when: false
+  check_mode: false
+  failed_when: ceph_k8s_diff.rc > 1
+
+- name: Apply the ceph-csi manifests that differ
+  ansible.builtin.command: "{{ check_echo }} k3s kubectl apply -f -"
+  args:
+    stdin: "{{ lookup('ansible.builtin.file', item.item) }}"
+  loop: "{{ ceph_k8s_diff.results }}"
+  loop_control:
+    label: "{{ item.item | basename }}"
+  check_mode: false
+  when: item.rc == 1

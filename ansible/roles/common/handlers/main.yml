@@ -1,0 +1,2 @@
+- name: Apply the AppArmor workaround
+  ansible.builtin.command: sysctl -p /etc/sysctl.d/60-k3s-apparmor-workaround.conf

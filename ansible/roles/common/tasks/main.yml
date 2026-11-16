@@ -1,0 +1,110 @@
+# Base settings every node needs before Ceph and k3s (lab-plan step 0).
+
+- name: Hostname matches the inventory name
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+# Each node's name must resolve to its real address, not a loopback one the
+# other nodes can't reach (Ceph and k3s pick up the node's address this way).
+- name: No 127.0.1.1 line in /etc/hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1\s'
+    state: absent
+
+- name: /etc/hosts has a line for every lab node (the network has no DNS for them)
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^\S+\s+{{ item }}$'
+    line: "{{ hostvars[item].node_ip }}  {{ item }}"
+  loop: "{{ groups['lab'] }}"
+
+# Kubernetes expects nodes without swap.
+- name: Swap is off now
+  ansible.builtin.command: "{{ check_echo }} swapoff -a"
+  check_mode: false
+  when: ansible_facts.swaptotal_mb > 0
+
+- name: No swap entry in /etc/fstab
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    regexp: '\sswap\s'
+    state: absent
+
+- name: No swap file
+  ansible.builtin.file:
+    path: /swap.img
+    state: absent
+
+- name: SSH server and the UTM guest agent are installed
+  ansible.builtin.apt:
+    name:
+      - openssh-server
+      - qemu-guest-agent
+    state: present
+
+- name: SSH starts at boot and is running
+  ansible.builtin.service:
+    name: ssh
+    enabled: true
+    state: started
+
+# No desktop: saves 1-2 GB of RAM per node.
+- name: Read the boot target
+  ansible.builtin.command: systemctl get-default
+  register: boot_target
+  changed_when: false
+  check_mode: false               # read-only, so it also runs in --check
+
+- name: Boot to text mode
+  ansible.builtin.command: "{{ check_echo }} systemctl set-default multi-user.target"
+  check_mode: false
+  when: boot_target.stdout != 'multi-user.target'
+
+# containerd#14485: with this at 1 on Ubuntu 26.04, containers can't signal
+# their own processes. Remove the file once k3s ships the containerd fix.
+- name: AppArmor workaround for k3s
+  ansible.builtin.copy:
+    src: 60-k3s-apparmor-workaround.conf
+    dest: /etc/sysctl.d/60-k3s-apparmor-workaround.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Apply the AppArmor workaround
+
+# Fixed address. The installer's netplan file turns DHCP on (netplan merges
+# all its files) and names the base VM's MAC, so it has to go.
+- name: The installer's netplan file is gone
+  ansible.builtin.file:
+    path: /etc/netplan/00-installer-config.yaml
+    state: absent
+
+# Only changes the saved connection; it takes effect at the next
+# 'nmcli con up' or boot. Applying it live moves the node's address under
+# Ansible's own SSH connection, so that's left to the person running it.
+# Plain nmcli rather than community.general.nmcli: the module insists on an
+# interface name, and the installer's connection has none (it isn't tied to
+# a card name; enp0s1 is the only one), so the module always saw a change.
+- name: Read the connection's address settings
+  ansible.builtin.command: >-
+    nmcli -g ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns,connection.autoconnect
+    connection show {{ lab_connection }}
+  register: lab_net
+  changed_when: false
+  check_mode: false
+
+- name: Fixed address on the NetworkManager connection
+  ansible.builtin.command: >-
+    {{ check_echo }} nmcli connection modify {{ lab_connection }}
+    ipv4.method manual ipv4.addresses {{ node_ip }}/{{ lab_prefix }}
+    ipv4.gateway {{ lab_gateway }} ipv4.dns {{ lab_dns }}
+    connection.autoconnect yes
+  when: lab_net.stdout_lines != lab_net_wanted
+  vars:
+    lab_net_wanted:
+      - manual
+      - "{{ node_ip }}/{{ lab_prefix }}"
+      - "{{ lab_gateway }}"
+      - "{{ lab_dns }}"
+      - "yes"
+  check_mode: false
