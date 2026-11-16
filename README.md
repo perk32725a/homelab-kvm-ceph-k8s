@@ -11,7 +11,8 @@ Kubernetes storage through ceph-csi.
 | node3 | 192.168.65.203 | Ceph mon/mgr/mds/osd, k3s agent    |
 
 The application deployed on it (an ASP.NET Core music database with MySQL,
-Redis and HAProxy) lives in its own repo, MusicDB-CS (`k8s/` folder).
+Redis and HAProxy) lives in its own repo,
+[MusicDB-CS](https://github.com/perk32725a/MusicDB-CS) (`k8s/` folder).
 
 ## Layout
 
